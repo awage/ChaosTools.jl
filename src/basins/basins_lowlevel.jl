@@ -1,8 +1,9 @@
 import ProgressMeter
 using Statistics: mean
+using SparseArrayKit
 
 mutable struct BasinsInfo{B, IF, RF, UF, D, T, Q, K}
-    basins::Array{Int16, B}
+    basins::SparseArray{Int16, B}
     grid_steps::SVector{B, Float64}
     grid_maxima::SVector{B, Float64}
     grid_minima::SVector{B, Float64}
@@ -40,7 +41,8 @@ function init_bsn_nfo(
     grid_maxima = maximum.(grid)
     grid_minima = minimum.(grid)
     bsn_nfo = BasinsInfo(
-        zeros(Int16, map(length, grid)),
+        #zeros(Int16, map(length, grid)),
+        SparseArray{Int16}(undef, map(length, grid)),
         SVector{B, Float64}(grid_steps),
         SVector{B, Float64}(grid_maxima),
         SVector{B, Float64}(grid_minima),
