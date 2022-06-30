@@ -1,4 +1,4 @@
-export basins_fractions_clustering, basins_fractions
+export basins_fractions_clustering, basins_fractions, cluster_datasets
 using Statistics: mean
 using Neighborhood
 using Distances, Clustering, Distributions
@@ -8,53 +8,18 @@ using ProgressMeter
 #####################################################################################
 # AttractorMapper API
 #####################################################################################
-struct AttractorsViaFeaturizing{DS<:GeneralizedDynamicalSystem, T, F, A, K, M} <: AttractorMapper
-    ds::DS
-    Ttr::T
-    Δt::T
-    total::T
-    featurizer::F
-    attractors_ic::A
-    diffeq::K
-    clust_method_norm::M
-    clust_method::String
-    clustering_threshold::Float64
-    min_neighbors::Int
-    rescale_features::Bool
-    optimal_radius_method::String
-end
-DynamicalSystemsBase.get_rule_for_print(m::AttractorsViaFeaturizing) =
-get_rule_for_print(m.ds)
-
-function Base.show(io::IO, mapper::AttractorsViaFeaturizing)
-    ps = generic_mapper_print(io, mapper)
-    println(io, rpad(" type: ", ps), nameof(typeof(mapper.ds)))
-    println(io, rpad(" featurizer: ", ps), DynamicalSystemsBase.eomstring(mapper.featurizer))
-    println(io, rpad(" Ttr: ", ps), mapper.Ttr)
-    println(io, rpad(" Δt: ", ps), mapper.Δt)
-    println(io, rpad(" T: ", ps), mapper.total)
-    println(io, rpad(" supervised: ", ps), !isnothing(mapper.attractors_ic))
-    return
-end
-
 """
-    AttractorsViaFeaturizing(ds::DynamicalSystem, featurizer::Function; kwargs...) → mapper
+    ClusteringConfig(; kwargs...) 
 
-Initialize a `mapper` that maps initial conditions to attractors using the featurizing and
-clustering method of [^Stender2021]. See [`AttractorMapper`](@ref) for how to use the
-`mapper`.
+Initialize a struct that contains information used to cluster trajectories (including
+attractors) via the function `cluster_datasets` (see [`cluster_datasets`](@ref)), which uses
+the featurizing and clustering method based on [^Stender2021].
 
-`featurizer` is a function that takes as an input an integrated trajectory `A::Dataset` and
-the corresponding time vector `t` and returns a `Vector{<:Real}` of features describing the
-trajectory.
 
 ## Keyword arguments
-### Integration
-* `T=100, Ttr=100, Δt=1, diffeq=NamedTuple()`: Propagated to [`trajectory`](@ref).
-
-### Feature extraction and classification
-* `attractors_ic = nothing` Enables supervised version, see below. If given, must be a
-  `Dataset` of initial conditions each leading to a different attractor.
+* `templates = nothing` Enables supervised version, see below. If given, must be a
+  `Dataset` of initial conditions each leading to a different attractor, to which
+  trajectories will be matched.
 * `min_neighbors = 10`: (unsupervised method only) minimum number of neighbors (i.e. of
   similar features) each feature needs to have in order to be considered in a cluster (fewer
   than this, it is labeled as an outlier, `-1`).
@@ -76,6 +41,96 @@ the optimal radius for clustering features in the unsupervised method. The `silh
     method chooses the the radius according to the elbow (knee, highest-derivative method)
     (see [`optimal_radius_dbscan_elbow`](@ref) for details), and is quicker though possibly
     leads to worse clustering.
+
+## Description
+The trajectory `X`, which may for instance be an attractor, is transformed into a vector of
+features. Each feature is a number useful in _characterizing the attractor_, and
+distinguishing it from other attrators. Example features are the mean or standard deviation
+of one of the of the timeseries of the trajectory, the entropy of the first two dimensions,
+the fractal dimension of `X`, or anything else you may fancy. The vectors of features are
+then used to identify clusters of attractors. 
+
+There are two versions to do this. The **unsupervised versions** will cluster trajectories
+(e.g. attractors) using the DBSCAN algorithm, which does not rely on templates. Features whose
+cluster is not identified are labeled as `-1`. If each attractors spans different scales of
+magnitude, rescaling them into the same `[0,1]` interval can bring significant improvements
+in the clustering in case the `Euclidean` distance metric is used.   
+
+In the **supervised version**, the user provides features to be used as templates guiding the
+clustering via the `templates` keyword. Each trajectory is considered to belong to
+the nearest template (based on the distance in feature space). 
+
+[^Stender2021]: Stender & Hoffmann, [bSTAB: an open-source software for computing the basin
+    stability of multi-stable dynamical systems](https://doi.org/10.1007/s11071-021-06786-5)
+"""
+mutable struct ClusteringConfig{A, M} 
+    templates::A
+    clust_method_norm::M
+    clust_method::String
+    clustering_threshold::Float64
+    min_neighbors::Int
+    rescale_features::Bool
+    optimal_radius_method::String
+end
+
+function ClusteringConfig(;templates::Union{Nothing, Vector}=nothing,
+        clust_method_norm=Euclidean(), clustering_threshold = 0.0, min_neighbors = 10,
+        clust_method = clustering_threshold > 0 ? "kNN_thresholded" : "kNN", 
+        rescale_features=true, optimal_radius_method="silhouettes",
+    )
+    return ClusteringConfig(
+        templates, clust_method_norm, clust_method, 
+        Float64(clustering_threshold), min_neighbors, rescale_features, optimal_radius_method
+    )
+end
+
+struct AttractorsViaFeaturizing{DS<:GeneralizedDynamicalSystem, C<:ClusteringConfig, T, K, A,
+    F} <: AttractorMapper
+    ds::DS
+    featurizer::F
+    cluster_specs::C
+    Ttr::T
+    Δt::T
+    total::T
+    diffeq::K
+    attractors_ic::A
+end
+DynamicalSystemsBase.get_rule_for_print(m::AttractorsViaFeaturizing) =
+get_rule_for_print(m.ds)
+
+function Base.show(io::IO, mapper::AttractorsViaFeaturizing)
+    ps = generic_mapper_print(io, mapper)
+    println(io, rpad(" type: ", ps), nameof(typeof(mapper.ds)))
+    println(io, rpad(" Ttr: ", ps), mapper.Ttr)
+    println(io, rpad(" Δt: ", ps), mapper.Δt)
+    println(io, rpad(" T: ", ps), mapper.total)
+    return
+end
+
+"""
+Featurize the dataset and then cluster it via DBSCAN or kNN.
+"""
+function cluster_datasets(dataset, featurizer, cluster_specs::ClusteringConfig)
+    feature_array = extract_features(featurizer, dataset)
+    return cluster_features(feature_array, cluster_specs)
+end
+
+"""
+    AttractorsViaFeaturizing(ds::DynamicalSystem, featurizer::Function, 
+    cluster_specs::ClusteringConfig; kwargs...) → mapper
+
+Initialize a `mapper` that maps initial conditions to attractors using the featurizing and
+clustering method of [^Stender2021]. See [`AttractorMapper`](@ref) for how to use the
+`mapper`.
+
+Takes as input the dynamical system `ds` and the struct with clustering information
+`cluster_specs`. See [`ClusteringConfig`](@ref) for more details on it. Also `featurizer`,
+which is a function that takes as an input an integrated trajectory `A::Dataset` and the
+corresponding time vector `t` and returns a `Vector{<:Real}` of features describing the
+trajectory.
+
+## Keyword arguments
+* `T=100, Ttr=100, Δt=1, diffeq=NamedTuple()`: Propagated to [`trajectory`](@ref).
 
 ## Description
 The trajectory `X` of each initial condition is transformed into a vector of features. Each
@@ -114,34 +169,32 @@ simply start Julia with the number of threads you want to use.
 [^Stender2021]: Stender & Hoffmann, [bSTAB: an open-source software for computing the basin
     stability of multi-stable dynamical systems](https://doi.org/10.1007/s11071-021-06786-5)
 """
-function AttractorsViaFeaturizing(ds::GeneralizedDynamicalSystem, featurizer::Function;
-        attractors_ic::Union{AbstractDataset, Nothing}=nothing, T=100, Ttr=100, Δt=1,
-        clust_method_norm=Euclidean(),
-        clustering_threshold = 0.0, min_neighbors = 10, diffeq = NamedTuple(),
-        clust_method = clustering_threshold > 0 ? "kNN_thresholded" : "kNN", 
-        rescale_features=true, optimal_radius_method="silhouettes",
-    )
+function AttractorsViaFeaturizing(ds::GeneralizedDynamicalSystem, featurizer::Function,
+    cluster_specs::ClusteringConfig; T=100, Ttr=100, Δt=1, diffeq = NamedTuple(),
+    attractors_ic::Union{AbstractDataset, Nothing}=nothing)
     if ds isa ContinuousDynamicalSystem
         T, Ttr, Δt = float.((T, Ttr, Δt))
     end
     return AttractorsViaFeaturizing(
-        ds, Ttr, Δt, T, featurizer, attractors_ic, diffeq,
-        clust_method_norm, clust_method, Float64(clustering_threshold), min_neighbors,
-        rescale_features, optimal_radius_method
+        ds, featurizer, cluster_specs, Ttr, Δt, T, diffeq, attractors_ic
     )
 end
 
+
 # We need to extend the general `basins_fractions`, because the clustering method
 # cannot map individual initial conditions to attractors
+"""
+`N = 1000` : number of initial conditions to be sampled, if `ics` is passed as a `Function`.
+"""
 function basins_fractions(mapper::AttractorsViaFeaturizing, ics::Union{AbstractDataset, Function};
         show_progress = true, N = 1000
     )
     feature_array = extract_features(mapper, ics; show_progress, N)
-    class_labels, = classify_features(feature_array, mapper)
-    fs = basins_fractions(class_labels) # Vanilla fractions method with Array input
+    cluster_labels,  = cluster_features(feature_array, mapper.cluster_specs)
+    fs = basins_fractions(cluster_labels) # Vanilla fractions method with Array input
     if typeof(ics) <: AbstractDataset
-        attractors = extract_attractors(mapper, class_labels, ics)
-        return fs, class_labels, attractors
+        attractors = extract_attractors(mapper, cluster_labels, ics)
+        return fs, cluster_labels, attractors
     else
         return fs
     end
@@ -178,35 +231,47 @@ function extract_attractors(mapper::AttractorsViaFeaturizing, labels, ics)
     Ttr = mapper.Ttr, Δt = mapper.Δt, diffeq = mapper.diffeq) for i in uidxs if i ≠ -1)
 end
 
+"""
+Extracts features from trajectories directly, including eg attractors. 
+"""
+function extract_features(featurizer::Function, atts)
+    N = length(atts) # number of attractors
+    feature_array = Vector{Vector{Float64}}(undef, N)
+    for i ∈ 1:N
+        feature_array[i] = featurizer(atts[i], []) #t not being considered for featurizers, possible todo is to allow for that
+    end
+    return reduce(hcat, feature_array) # Convert to Matrix from Vector{Vector}
+end
+
 #####################################################################################
 # Clustering classification low level code
 #####################################################################################
-function classify_features(features, mapper::AttractorsViaFeaturizing)
-    if !isnothing(mapper.attractors_ic)
-        classify_features_distances(features, mapper)
+function cluster_features(features, cluster_specs::ClusteringConfig)
+    if !isnothing(cluster_specs.templates)
+        cluster_features_distances(features, cluster_specs)
     else
-        classify_features_clustering(features, mapper.min_neighbors, mapper.clust_method_norm,
-        mapper.rescale_features, mapper.optimal_radius_method)
+        cluster_features_clustering(features, cluster_specs.min_neighbors, cluster_specs.clust_method_norm,
+        cluster_specs.rescale_features, cluster_specs.optimal_radius_method)
     end
 end
 
 # Supervised method: closest attractor template in feature space
-function classify_features_distances(features, mapper)
+function cluster_features_distances(features, cluster_specs)
 
-    templates = extract_features(mapper, mapper.attractors_ic; show_progress=false)
+    templates = Float64.(reduce(hcat, cluster_specs.templates)) #casting to float needed for kNN
 
-    if mapper.clust_method == "kNN" || mapper.clust_method == "kNN_thresholded"
-        template_tree = searchstructure(KDTree, templates, mapper.clust_method_norm)
-        class_labels, class_errors = bulksearch(template_tree, features, NeighborNumber(1))
-        class_labels = reduce(vcat, class_labels) # make it a vector
-        if mapper.clust_method == "kNN_thresholded" # Make label -1 if error bigger than threshold
-            class_errors = reduce(vcat, class_errors)
-            class_labels[class_errors .≥ mapper.clustering_threshold] .= -1
+    if cluster_specs.clust_method == "kNN" || cluster_specs.clust_method == "kNN_thresholded"
+        template_tree = searchstructure(KDTree, templates, cluster_specs.clust_method_norm)
+        cluster_labels, cluster_errors = bulksearch(template_tree, features, NeighborNumber(1))
+        cluster_labels = reduce(vcat, cluster_labels) # make it a vector
+        if cluster_specs.clust_method == "kNN_thresholded" # Make label -1 if error bigger than threshold
+            cluster_errors = reduce(vcat, cluster_errors)
+            cluster_labels[cluster_errors .≥ cluster_specs.clustering_threshold] .= -1
         end
     else
         error("Incorrect clustering mode.")
     end
-    return class_labels, class_errors
+    return cluster_labels, cluster_errors
 end
 
 """
@@ -220,26 +285,26 @@ function rescale(vec::Vector{T}) where T
 end
 
 # Unsupervised method: clustering in feature space
-function classify_features_clustering(features, min_neighbors, metric, rescale_features,
+function cluster_features_clustering(features, min_neighbors, metric, rescale_features,
      optimal_radius_method)
+    dimfeats, nfeats = size(features); if dimfeats ≥ nfeats return 1:nfeats, zeros(nfeats) end  #needed because dbscan, as implemented, needs to receive as input a matrix D x N such that D < N
     if rescale_features features = mapslices(rescale, features, dims=2) end
     ϵ_optimal = optimal_radius_dbscan(features, min_neighbors, metric, optimal_radius_method)
     # Now recalculate the final clustering with the optimal ϵ
     clusters = dbscan(features, ϵ_optimal; min_neighbors)
     clusters, sizes = sort_clusters_calc_size(clusters)
-    class_labels = cluster_assignment(clusters, features; include_boundary=false)
+    cluster_labels = cluster_assignment(clusters, features; include_boundary=false)
     # number of real clusters (size above minimum points);
     # this is also the number of "templates"
     k = length(sizes[sizes .> min_neighbors])
     # create templates/labels, assign errors
-    class_errors = zeros(size(features)[2])
+    cluster_errors = zeros(size(features)[2])
     for i=1:k
-        idxs_cluster = class_labels .== i
-        center = mean(features[:, class_labels .== i], dims=2)[:,1]
+        idxs_cluster = cluster_labels .== i
+        center = mean(features[:, cluster_labels .== i], dims=2)[:,1]
         dists = colwise(Euclidean(), center, features[:, idxs_cluster])
-        class_errors[idxs_cluster] = dists
+        cluster_errors[idxs_cluster] = dists
     end
 
-    return class_labels, class_errors
+    return cluster_labels, cluster_errors
 end
-
