@@ -273,6 +273,10 @@ function get_label_ic!(bsn_nfo::BasinsInfo, integ, u0; kwargs...)
     while cell_label == 0
         bsn_nfo.iter_f!(integ)
         new_y = get_state(integ)
+        # if check_error(integ) != :success
+        #     @warn "got a problem"
+        #     return -1 
+        # end
         # The internal function `_possibly_reduced_state` exists solely to
         # accommodate the special case of a Poincare map with the grid defined
         # directly on the hyperplane, `plane::Tuple{Int, <: Real}`.
