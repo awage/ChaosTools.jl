@@ -81,8 +81,8 @@ end
     ps = range(0.0, 0.4; length = 101)
 
     # This is standard henon map
-    ds = Systems.henon(; b = 0.3, a = 1.4)
-    ps = range(1.2, 1.25; length = 101)
+    # ds = Systems.henon(; b = 0.3, a = 1.4)
+    # ps = range(1.2, 1.25; length = 101)
     # In these parameters we go from a chaotic attractor to a period 7 orbit at a≈1.2265
     # (you can see this by launching our wonderful `interactive_orbitdiagram` app).
     # So we can use this to test different matching processes
@@ -164,7 +164,7 @@ using OrdinaryDiffEq
 F = 6.886; G = 1.347; a = 0.255; b = 4.0
 ds = Systems.lorenz84(; F, G, a, b)
 diffeq = (alg = Vern9(), reltol = 1e-9, abstol = 1e-9, maxiters = 1e12)
-M = 600; z = 3
+M = 1000; z = 5
 xg = yg = zg = range(-z, z; length = M)
 grid = (xg, yg, zg)
 
@@ -247,3 +247,41 @@ ax.xlabel = "G parameter"
 axislegend(ax; position = :lt)
 Makie.save("lorenz84_fracs.png", fig; px_per_unit = 4)
 negate_remove_bg("lorenz84_fracs.png")
+
+
+
+@testset "Henon map Features" begin
+    # Reference for the "new Henon": Shrimali, Manish Dev, et al. "The nature of attractor basins in multistable systems." International Journal of Bifurcation and Chaos 18.06 (2008): 1675-1688. https://doi.org/10.1142/S0218127408021269
+    function new_henon(x, p, n)
+        return SVector{2}(p[1] - x[1]^2 - (1 - p[2])*x[2],  x[1])
+    end
+    a = 0.0
+    ν = 0.01
+    u0 = [0.0, 0.6]
+    ds = DiscreteDynamicalSystem(new_henon, u0, [a,ν])
+    ps = range(0.0, 0.4; length = 10)
+
+
+    pidx = 1
+    sampler, = statespace_sampler(Random.MersenneTwister(1234);
+        min_bounds = [-2,-2], max_bounds = [2,2]
+    )
+    function featurizer(A, t)
+        # Notice that unsupervised clustering cannot support "divergence to infinity",
+        # which it identifies as another attractor (in fact, the first one).
+        x = [mean(A[:, 1]), mean(A[:, 2])]
+        return any(isnan, x) ? [200.0, 200.0] : x
+    end
+
+    clusterspecs = ClusteringConfig()
+    mapper = AttractorsViaFeaturizing(ds, featurizer, clusterspecs; Ttr=500
+    )
+
+    continuation = FeaturizingSeedingContinuation(mapper)
+    fractions_curves, attractors_info = basins_fractions_continuation(
+        continuation, ps, pidx, sampler;
+        show_progress = true, samples_per_parameter = 100
+    )
+
+end
+

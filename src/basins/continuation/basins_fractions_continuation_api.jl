@@ -42,3 +42,4 @@ end
 
 include("match_attractor_ids.jl")
 include("continuation_recurrences.jl")
+include("continuation_features.jl")
